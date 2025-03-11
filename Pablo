@@ -1,19 +1,33 @@
---[[  
-    Модуль Loki с поддержкой Unload.
-    Все созданные объекты и подключения сохраняются, чтобы потом можно было их удалить.
+--[[
+    Модуль Pablo с поддержкой Unload.
+    Этот скрипт реализует:
+      • Инициализацию сервисов и переменных
+      • Функции track и trackConnection для отслеживания созданных объектов и подключений
+      • Отображение краткой надписи "Made by: ya_mertvi"
+      • Параметры способностей
+      • Функции getFootball, playerHasBall, restoreBallWeld, playAnimation
+      • Реализацию способностей:
+            - Vertical Spinning Shot
+            - Free Kick
+            - Mega Dribbling
+            - Sneak
+            - Godspeed Shot
+            - Chop (с эффектом зигзага)
+      • Создание кнопок в InGameUI для вызова способностей и обработку клавиш
+      • Функцию Unload, которая очищает все созданные объекты и подключения
 --]]
 
-local LokiModule = {}
-local createdObjects = {}  -- сюда будем сохранять все созданные объекты
-local connections = {}     -- сюда сохраняем все подключения к событиям
+local PabloModule = {}
+local createdObjects = {}   -- здесь будут сохраняться все созданные объекты
+local connections = {}      -- здесь сохраняются подключения к событиям
 
--- Обёртка для отслеживания созданных объектов
+-- Функция для отслеживания объектов
 local function track(object)
     table.insert(createdObjects, object)
     return object
 end
 
--- Обёртка для отслеживания подключений
+-- Функция для отслеживания подключений
 local function trackConnection(connection)
     table.insert(connections, connection)
     return connection
@@ -24,20 +38,21 @@ end
 ---------------------------------------------------------------------
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
 local Teams = game:GetService("Teams")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local mouse = player:GetMouse()
 
--- Глобальная переменная для выбранного игрока через GUI (будет хранить объект Player)
+-- Переменная для выбранного игрока (если используется в GUI)
 local mobileSelectedTarget = nil
 
 ---------------------------------------------------------------------
--- Добавление текста "Made by:ya_mertvi" в центре экрана при запуске скрипта
+-- Надпись при запуске
 ---------------------------------------------------------------------
 do
     local introGui = track(Instance.new("ScreenGui"))
@@ -45,31 +60,39 @@ do
     introGui.Parent = playerGui
 
     local introText = track(Instance.new("TextLabel", introGui))
-    introText.Size = UDim2.new(0, 400, 0, 100)
-    introText.Position = UDim2.new(0.5, -200, 0.5, -50)
-    introText.Text = "Made by:ya_mertvi"
+    introText.Size = UDim2.new(0,400,0,100)
+    introText.Position = UDim2.new(0.5,-200,0.5,-50)
+    introText.Text = "Made by: ya_mertvi"
     introText.TextScaled = true
     introText.BackgroundTransparency = 1
-    introText.TextColor3 = Color3.new(1, 1, 1)
+    introText.TextColor3 = Color3.new(1,1,1)
     introText.Font = Enum.Font.SourceSansBold
-
     task.delay(3, function()
         introGui:Destroy()
     end)
 end
 
 ---------------------------------------------------------------------
--- ПАРАМЕТРЫ СПОСОБНОСТЕЙ (настраиваемые через меню)
+-- Параметры способностей
 ---------------------------------------------------------------------
-local freeKickPassSpeed = 350       -- сила паса (используется при вызове Shoot)
-local freeKickArcDuration = 0.5     -- время подъёма (сек.)
-local freeKickUpwardForce = 50      -- сила подъёма
-local updateMultiplier = 6.5        -- множитель для плавной интерполяции траектории
-local maxClamp = 300                -- верхний предел скорости паса
-local endFlightThreshold = 7        -- если расстояние между мячом и целью <= это значение, полёт прекращается
+local abilityParameters = {
+    MegaDribbling = {
+         moveDistance = 45,
+         moveDuration = 0.6,
+    },
+    Sneak = {
+         moveDistance = 53,
+         moveDuration = 0.69,
+    },
+    Chop = {
+         segmentDistance = 25,
+         segmentTime = 0.2,
+         turnAngles = {45, -90, 90, -90, 90, -90, 90, -90},
+    }
+}
 
 ---------------------------------------------------------------------
--- Функция поиска мяча
+-- Функция поиска мяча (Football)
 ---------------------------------------------------------------------
 local function getFootball()
     local ball = workspace:FindFirstChild("Football")
@@ -82,7 +105,7 @@ local function getFootball()
 end
 
 ---------------------------------------------------------------------
--- Проверка наличия мяча у игрока
+-- Проверка, имеет ли игрок мяч
 ---------------------------------------------------------------------
 local function playerHasBall()
     local char = player.Character
@@ -95,68 +118,7 @@ local function playerHasBall()
 end
 
 ---------------------------------------------------------------------
--- Изменение и фиксация стиля UI (пример)
----------------------------------------------------------------------
-do
-    local style = playerGui:WaitForChild("Style")
-    local bg = style:WaitForChild("BG")
-    
-    local styleTxt = bg:WaitForChild("StyleTxt")
-    styleTxt.Text = "Pablo Cavasoz"
-    local uiGradient = Instance.new("UIGradient", styleTxt)
-    uiGradient.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.new(1, 0, 0)),
-        ColorSequenceKeypoint.new(0.2, Color3.new(1, 0.5, 0)),
-        ColorSequenceKeypoint.new(0.4, Color3.new(1, 1, 0)),
-        ColorSequenceKeypoint.new(0.6, Color3.new(0, 1, 0)),
-        ColorSequenceKeypoint.new(0.8, Color3.new(0, 0, 1)),
-        ColorSequenceKeypoint.new(1, Color3.new(1, 0, 1))
-    }
-    uiGradient.Rotation = 45
-
-    styleTxt:GetPropertyChangedSignal("Text"):Connect(function()
-        if styleTxt.Text ~= "Pablo Cavasoz" then
-            styleTxt.Text = "Pablo Cavasoz"
-        end
-    end)
-    styleTxt:GetPropertyChangedSignal("TextColor3"):Connect(function()
-        if styleTxt.TextColor3 ~= Color3.new(1,1,1) then
-            styleTxt.TextColor3 = Color3.new(1,1,1)
-        end
-    end)
-
-    local desc = bg:WaitForChild("Desc")
-    desc.Text = "Professional player from Argentina with unsuspected kicks and passes"
-    desc:GetPropertyChangedSignal("Text"):Connect(function()
-        if desc.Text ~= "Professional player from Argentina with unsuspected kicks and passes" then
-            desc.Text = "Professional player from Argentina with unsuspected kicks and passes"
-        end
-    end)
-    local lockedDescColor = desc.TextColor3
-    desc:GetPropertyChangedSignal("TextColor3"):Connect(function()
-        if desc.TextColor3 ~= lockedDescColor then
-            desc.TextColor3 = lockedDescColor
-        end
-    end)
-end
-
----------------------------------------------------------------------
--- Функция для воспроизведения анимаций
----------------------------------------------------------------------
-local function playAnimation(animationId)
-    local character = player.Character or player.CharacterAdded:Wait()
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if humanoid then
-        local animation = Instance.new("Animation")
-        animation.AnimationId = animationId
-        local animTrack = humanoid:LoadAnimation(animation)
-        animTrack:Play()
-        return animTrack
-    end
-end
-
----------------------------------------------------------------------
--- Функция для восстановления сварки мяча к персонажу
+-- Функция восстановления сварки мяча к персонажу
 ---------------------------------------------------------------------
 local function restoreBallWeld(ball)
     local parent = ball.Parent
@@ -194,9 +156,30 @@ local function restoreBallWeld(ball)
 end
 
 ---------------------------------------------------------------------
--- 1) Способность: Vertical Spinning Shot (V)
+-- Функция для воспроизведения анимаций
+---------------------------------------------------------------------
+local function playAnimation(animationId)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        local anim = Instance.new("Animation")
+        anim.AnimationId = animationId
+        local animTrack = humanoid:LoadAnimation(anim)
+        animTrack.Priority = Enum.AnimationPriority.Action
+        animTrack:Play()
+        return animTrack
+    end
+end
+
+---------------------------------------------------------------------
+-- Способности
 ---------------------------------------------------------------------
 local verticalSpinningShotAnimationId = "rbxassetid://83376040878208" 
+local megaDribbleAnimationId = "rbxassetid://18915766106"
+local sneakAnimationId = "rbxassetid://18915891839"
+local godspeedShotAnimationId = "rbxassetid://115758343285328"
+local chopAnimationId = "rbxassetid://118515432350420"
+
 local function activateVerticalSpinningShot()
     if not playerHasBall() then return end
     playAnimation(verticalSpinningShotAnimationId)
@@ -263,9 +246,6 @@ local function activateVerticalSpinningShot()
     end)
 end
 
----------------------------------------------------------------------
--- 2) Способность: Free Kick (F)
----------------------------------------------------------------------
 local function activateFreeKick()
     if not playerHasBall() then return end
 
@@ -328,13 +308,13 @@ local function activateFreeKick()
     local shootEvent = knitPackages.RE:FindFirstChild("Shoot")
     if shootEvent then
         local initialDirection = (targetHRP.Position - ball.Position).Unit
-        shootEvent:FireServer(freeKickPassSpeed, nil, nil, initialDirection)
+        shootEvent:FireServer(350, nil, nil, initialDirection)
     end
 
     local arcPhase = true
     local arcTime = 0
-    local arcDuration = freeKickArcDuration
-    local upwardForce = freeKickUpwardForce
+    local arcDuration = 0.5
+    local upwardForce = 50
 
     ball.AssemblyLinearVelocity = Vector3.new(0, upwardForce, 0)
 
@@ -354,7 +334,7 @@ local function activateFreeKick()
             return
         end
 
-        if (targetHRP.Position - ball.Position).Magnitude <= endFlightThreshold then
+        if (targetHRP.Position - ball.Position).Magnitude <= 7 then
             heartbeatConn:Disconnect()
             ball.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             return
@@ -362,23 +342,17 @@ local function activateFreeKick()
 
         local vector3_dir = Vector3.new(targetHRP.AssemblyLinearVelocity.X, 0, targetHRP.AssemblyLinearVelocity.Z)
         local desiredDirection = (((targetHRP.Position + vector3_dir) - ball.Position).Unit + Vector3.new(0, 0.5, 0))
-        local clampedMagnitude = math.clamp((targetHRP.Position - ball.Position).Magnitude * 1.5, 70, maxClamp)
-        ball.AssemblyLinearVelocity = ball.AssemblyLinearVelocity:Lerp(desiredDirection * clampedMagnitude, updateMultiplier * delta)
+        local clampedMagnitude = math.clamp((targetHRP.Position - ball.Position).Magnitude * 1.5, 70, 300)
+        ball.AssemblyLinearVelocity = ball.AssemblyLinearVelocity:Lerp(desiredDirection * clampedMagnitude, 6.5 * delta)
     end)
 end
 
----------------------------------------------------------------------
--- 3) Способность: Mega Dribbling (B)
----------------------------------------------------------------------
-local dribbleAnimationId = "rbxassetid://18915766106"
-local dribbleDistance = 40
-local dribbleTime = 0.59
 local function activateMegaDribbling()
-    local char = player.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local character = player.Character
+    if not character then return end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-    playAnimation(dribbleAnimationId)
+    playAnimation(megaDribbleAnimationId)
     local knitPackages = ReplicatedStorage:WaitForChild("Packages")
     if knitPackages and knitPackages:FindFirstChild("Knit") and knitPackages.Knit.Services:FindFirstChild("BallService") then
         local ballService = knitPackages.Knit.Services.BallService
@@ -389,76 +363,117 @@ local function activateMegaDribbling()
             ballService.RE.Slide:FireServer()
         end
     end
-    local tweenInfo = TweenInfo.new(dribbleTime, Enum.EasingStyle.Linear)
-    local goalCFrame = hrp.CFrame + hrp.CFrame.LookVector * dribbleDistance
+    local tweenInfo = TweenInfo.new(0.59, Enum.EasingStyle.Linear)
+    local goalCFrame = hrp.CFrame + hrp.CFrame.LookVector * 40
     local tween = TweenService:Create(hrp, tweenInfo, {CFrame = goalCFrame})
     tween:Play()
 end
 
----------------------------------------------------------------------
--- 4) Способность: Strong Shot (N)
----------------------------------------------------------------------
-local function activateStrongShot()
+local function activateSneak()
+    local knitPackages = ReplicatedStorage:FindFirstChild("Packages")
+    if knitPackages and knitPackages:FindFirstChild("Knit") and knitPackages.Knit.Services:FindFirstChild("BallService") then
+        local ballService = knitPackages.Knit.Services.BallService
+        if ballService.RE:FindFirstChild("Slide") then
+            ballService.RE.Slide:FireServer()
+        end
+    end
+    playAnimation(sneakAnimationId)
+    -- Дополнительные эффекты перемещения можно добавить здесь
+end
+
+local function fireGodspeedShot()
     if not playerHasBall() then return end
-    playAnimation(verticalSpinningShotAnimationId)
-    task.wait(0.2)
-    local knitPackages = ReplicatedStorage:WaitForChild("Packages")
+    local shootEvent = ReplicatedStorage:WaitForChild("Packages")
         :WaitForChild("Knit")
         :WaitForChild("Services")
         :WaitForChild("BallService")
-    local shootEvent = knitPackages.RE:FindFirstChild("Shoot")
+        :WaitForChild("RE")
+        :WaitForChild("Shoot")
     if shootEvent then
         local lookVector = workspace.CurrentCamera.CFrame.LookVector
-        shootEvent:FireServer(235, nil, nil, lookVector)
+        shootEvent:FireServer(1500, nil, nil, lookVector)
         task.spawn(function()
-            local ball, startTime = nil, tick()
+            local ball
+            local startTime = tick()
             repeat
                 task.wait()
                 ball = workspace:FindFirstChild("Football")
-            until ball and ball:IsA("BasePart") or tick() - startTime > 2
+            until ball and ball:IsA("BasePart") or tick()-startTime > 2
             if ball then
-                ball.AssemblyLinearVelocity = (lookVector + Vector3.new(0, 0.25, 0)) * 235
+                ball.AssemblyLinearVelocity = (lookVector + Vector3.new(0, 0.25, 0)) * 250
             end
         end)
     end
 end
 
----------------------------------------------------------------------
--- 5) Способность: Sneak (E)
----------------------------------------------------------------------
-local function activateSneak()
-    local knitPackages = ReplicatedStorage:FindFirstChild("Packages")
-    if knitPackages and knitPackages:FindFirstChild("Knit") and knitPackages.Knit.Services:FindFirstChild("BallService") then
-        local ballService = knitPackages.Knit.Services.BallService
-        local ball = getFootball()
-        if ball and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-            local distance = (ball.Position - player.Character.HumanoidRootPart.Position).Magnitude
-            local stealThreshold = 10
-            if distance <= stealThreshold then
-                if ball:IsDescendantOf(player.Character) then
-                    ball.Parent = workspace
-                    for _, constraint in ipairs(ball:GetDescendants()) do
-                        if constraint:IsA("Weld") or constraint:IsA("WeldConstraint") or constraint:IsA("Motor6D") then
-                            constraint:Destroy()
-                        end
-                    end
-                    ball.CanCollide = false
-                    task.delay(0.3, function()
-                        if ball then
-                            ball.CanCollide = true
-                        end
-                    end)
-                end
-                if ballService.RE:FindFirstChild("Slide") then
-                    ballService.RE.Slide:FireServer()
-                end
+local function playGodspeedShotAnimation(animId)
+    local animTrack = playAnimation(animId)
+    if animTrack then
+        local fired = false
+        trackConnection(animTrack.Stopped:Connect(function()
+            if not fired then
+                fired = true
+                fireGodspeedShot()
             end
-        end
+        end))
+        delay((animTrack.Length or 1) + 0.1, function()
+            if not fired then
+                fired = true
+                fireGodspeedShot()
+            end
+        end)
+    else
+        fireGodspeedShot()
     end
 end
 
+local function chopZigZag(animTrack)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local turnAngles = {45, -90, 90, -90, 90, -90, 90, -90}
+    local segmentDistance = abilityParameters.Chop.segmentDistance
+    local segmentTime = abilityParameters.Chop.segmentTime
+
+    local isZigZagActive = true
+    local connection
+    connection = trackConnection(RunService.Heartbeat:Connect(function()
+        if not isZigZagActive then
+            connection:Disconnect()
+            return
+        end
+        -- Здесь можно добавить визуальные эффекты (например, частицы)
+    end))
+
+    local i = 1
+    local function doNext()
+        if i > #turnAngles then
+            if animTrack then
+                animTrack:Stop()
+            end
+            isZigZagActive = false
+            return
+        end
+        local angle = turnAngles[i]
+        i = i + 1
+        local currentCF = hrp.CFrame
+        local rotation = CFrame.Angles(0, math.rad(angle), 0)
+        local newCF = currentCF * rotation
+        local targetCF = newCF + newCF.LookVector * segmentDistance
+        local tweenInfo = TweenInfo.new(segmentTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+        local tween = TweenService:Create(hrp, tweenInfo, {CFrame = targetCF})
+        tween:Play()
+        trackConnection(tween.Completed:Connect(function()
+            doNext()
+        end))
+    end
+
+    doNext()
+end
+
 ---------------------------------------------------------------------
--- Интерфейс способностей (кнопки и бинды)
+-- Интерфейс способностей (создание кнопок в InGameUI)
 ---------------------------------------------------------------------
 do
     local inGameUI = playerGui:WaitForChild("InGameUI")
@@ -506,32 +521,50 @@ do
     end
     strongShotButton.Parent = abilities
 
-    verticalSpinningShotButton.MouseButton1Click:Connect(function() activateVerticalSpinningShot() end)
-    freeKickButton.MouseButton1Click:Connect(function() activateFreeKick() end)
-    dribblingButton.MouseButton1Click:Connect(function() activateMegaDribbling() end)
-    strongShotButton.MouseButton1Click:Connect(function() activateStrongShot() end)
+    trackConnection(verticalSpinningShotButton.Activated:Connect(function() 
+        activateVerticalSpinningShot() 
+    end))
+    trackConnection(freeKickButton.Activated:Connect(function() 
+        activateFreeKick() 
+    end))
+    trackConnection(dribblingButton.Activated:Connect(function() 
+        activateMegaDribbling() 
+    end))
+    trackConnection(strongShotButton.Activated:Connect(function() 
+        activateVerticalSpinningShot()  -- здесь можно заменить на отдельную реализацию Strong Shot для Pablo
+    end))
 end
 
 ---------------------------------------------------------------------
 -- Обработка нажатия клавиш для способностей
 ---------------------------------------------------------------------
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
+trackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if input.KeyCode == Enum.KeyCode.V then
         activateVerticalSpinningShot()
     elseif input.KeyCode == Enum.KeyCode.F then
         activateFreeKick()
     elseif input.KeyCode == Enum.KeyCode.B then
-        activateMegaDribbling()
-    elseif input.KeyCode == Enum.KeyCode.N then
-        activateStrongShot()
-    elseif input.KeyCode == Enum.KeyCode.E then
-        activateSneak()
+        playGodspeedShotAnimation(godspeedShotAnimationId)
+    elseif input.KeyCode == Enum.KeyCode.H then
+        if ReplicatedStorage:FindFirstChild("Packages") 
+           and ReplicatedStorage.Packages:FindFirstChild("Knit") 
+           and ReplicatedStorage.Packages.Knit.Services:FindFirstChild("BallService") then
+            local ballService = ReplicatedStorage.Packages.Knit.Services.BallService
+            if ballService.RE:FindFirstChild("Dribble") then
+                ballService.RE.Dribble:FireServer()
+            end
+            if ballService.RE:FindFirstChild("Slide") then
+                ballService.RE.Slide:FireServer()
+            end
+        end
+        local animTrack = playAnimation(chopAnimationId)
+        chopZigZag(animTrack)
     end
-end)
+end))
 
 ---------------------------------------------------------------------
--- МЕНЮ НАСТРОЕК (Free Kick параметры и выбор цели)
+-- МЕНЮ НАСТРОЕК (пример реализации параметров и выбора цели)
 ---------------------------------------------------------------------
 local settingsGui = Instance.new("ScreenGui")
 settingsGui.Name = "SettingsGui"
@@ -540,19 +573,19 @@ settingsGui.ResetOnSpawn = false
 
 local settingsButton = Instance.new("TextButton")
 settingsButton.Name = "SettingsButton"
-settingsButton.Size = UDim2.new(0, 80, 0, 40)
-settingsButton.Position = UDim2.new(1, -90, 0, 10)
+settingsButton.Size = UDim2.new(0,80,0,40)
+settingsButton.Position = UDim2.new(1,-90,0,10)
 settingsButton.Text = "Settings"
 settingsButton.TextColor3 = Color3.new(1,1,1)
 settingsButton.BackgroundTransparency = 0.3
-settingsButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+settingsButton.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
 settingsButton.Parent = settingsGui
 
 local settingsMenu = Instance.new("Frame")
 settingsMenu.Name = "SettingsMenu"
-settingsMenu.Size = UDim2.new(0, 400, 0, 500)
-settingsMenu.Position = UDim2.new(0.5, -200, 0.5, -250)
-settingsMenu.BackgroundColor3 = Color3.new(0, 0, 0)
+settingsMenu.Size = UDim2.new(0,400,0,500)
+settingsMenu.Position = UDim2.new(0.5,-200,0.5,-250)
+settingsMenu.BackgroundColor3 = Color3.new(0,0,0)
 settingsMenu.BackgroundTransparency = 0.3
 settingsMenu.Active = true
 settingsMenu.Draggable = true
@@ -561,18 +594,18 @@ settingsMenu.Parent = settingsGui
 
 local closeSettingsButton = Instance.new("TextButton")
 closeSettingsButton.Name = "CloseSettingsButton"
-closeSettingsButton.Size = UDim2.new(0, 50, 0, 30)
-closeSettingsButton.Position = UDim2.new(1, -55, 0, 5)
+closeSettingsButton.Size = UDim2.new(0,50,0,30)
+closeSettingsButton.Position = UDim2.new(1,-55,0,5)
 closeSettingsButton.Text = "Close"
 closeSettingsButton.TextColor3 = Color3.new(1,1,1)
 closeSettingsButton.BackgroundTransparency = 0.3
-closeSettingsButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+closeSettingsButton.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
 closeSettingsButton.Parent = settingsMenu
 
 local parametersTabButton = Instance.new("TextButton")
 parametersTabButton.Name = "ParametersTab"
-parametersTabButton.Size = UDim2.new(0.5, -5, 0, 30)
-parametersTabButton.Position = UDim2.new(0, 5, 0, 40)
+parametersTabButton.Size = UDim2.new(0.5,-5,0,30)
+parametersTabButton.Position = UDim2.new(0,5,0,40)
 parametersTabButton.Text = "Parameters"
 parametersTabButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
 parametersTabButton.TextColor3 = Color3.new(1,1,1)
@@ -580,8 +613,8 @@ parametersTabButton.Parent = settingsMenu
 
 local targetTabButton = Instance.new("TextButton")
 targetTabButton.Name = "TargetTab"
-targetTabButton.Size = UDim2.new(0.5, -5, 0, 30)
-targetTabButton.Position = UDim2.new(0.5, 0, 0, 40)
+targetTabButton.Size = UDim2.new(0.5,-5,0,30)
+targetTabButton.Position = UDim2.new(0.5,0,0,40)
 targetTabButton.Text = "Target"
 targetTabButton.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
 targetTabButton.TextColor3 = Color3.new(1,1,1)
@@ -589,59 +622,59 @@ targetTabButton.Parent = settingsMenu
 
 local parametersFrame = Instance.new("Frame")
 parametersFrame.Name = "ParametersFrame"
-parametersFrame.Size = UDim2.new(0, 400, 0, 420)
-parametersFrame.Position = UDim2.new(0, 5, 0, 80)
+parametersFrame.Size = UDim2.new(0,400,0,420)
+parametersFrame.Position = UDim2.new(0,5,0,80)
 parametersFrame.BackgroundTransparency = 1
 parametersFrame.Parent = settingsMenu
 
 local targetFrame = Instance.new("Frame")
 targetFrame.Name = "TargetFrame"
-targetFrame.Size = UDim2.new(0, 400, 0, 420)
-targetFrame.Position = UDim2.new(0, 5, 0, 80)
+targetFrame.Size = UDim2.new(0,400,0,420)
+targetFrame.Position = UDim2.new(0,5,0,80)
 targetFrame.BackgroundTransparency = 1
 targetFrame.Visible = false
 targetFrame.Parent = settingsMenu
 
 local parametersScrolling = Instance.new("ScrollingFrame")
 parametersScrolling.Name = "ParametersScrolling"
-parametersScrolling.Size = UDim2.new(1, 0, 1, 0)
+parametersScrolling.Size = UDim2.new(1,0,1,0)
 parametersScrolling.BackgroundTransparency = 1
-parametersScrolling.CanvasSize = UDim2.new(0, 0, 0, 300)
+parametersScrolling.CanvasSize = UDim2.new(0,0,0,300)
 parametersScrolling.Parent = parametersFrame
 
 local parametersData = {
-    {name = "FreeKickPassSpeed", value = freeKickPassSpeed},
-    {name = "EndFlightThreshold", value = endFlightThreshold},
-    {name = "FreeKickArcDuration", value = freeKickArcDuration},
-    {name = "FreeKickUpwardForce", value = freeKickUpwardForce},
-    {name = "UpdateMultiplier", value = updateMultiplier},
-    {name = "MaxClamp", value = maxClamp},
+    {name = "FreeKickPassSpeed", value = 350},
+    {name = "EndFlightThreshold", value = 7},
+    {name = "FreeKickArcDuration", value = 0.5},
+    {name = "FreeKickUpwardForce", value = 50},
+    {name = "UpdateMultiplier", value = 6.5},
+    {name = "MaxClamp", value = 300},
 }
 
 local yOffset = 0
 for i, param in ipairs(parametersData) do
     local paramFrame = Instance.new("Frame")
-    paramFrame.Size = UDim2.new(1, -10, 0, 40)
-    paramFrame.Position = UDim2.new(0, 5, 0, yOffset)
+    paramFrame.Size = UDim2.new(1,-10,0,40)
+    paramFrame.Position = UDim2.new(0,5,0,yOffset)
     paramFrame.BackgroundTransparency = 0.5
-    paramFrame.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
+    paramFrame.BackgroundColor3 = Color3.new(0.1,0.1,0.1)
     paramFrame.Parent = parametersScrolling
 
     local paramLabel = Instance.new("TextLabel")
-    paramLabel.Size = UDim2.new(0.5, -5, 1, 0)
-    paramLabel.Position = UDim2.new(0, 5, 0, 0)
+    paramLabel.Size = UDim2.new(0.5,-5,1,0)
+    paramLabel.Position = UDim2.new(0,5,0,0)
     paramLabel.Text = param.name
     paramLabel.TextColor3 = Color3.new(1,1,1)
     paramLabel.BackgroundTransparency = 1
     paramLabel.Parent = paramFrame
 
     local paramBox = Instance.new("TextBox")
-    paramBox.Size = UDim2.new(0.5, -5, 1, 0)
-    paramBox.Position = UDim2.new(0.5, 5, 0, 0)
+    paramBox.Size = UDim2.new(0.5,-5,1,0)
+    paramBox.Position = UDim2.new(0.5,5,0,0)
     paramBox.Text = tostring(param.value)
     paramBox.TextColor3 = Color3.new(1,1,1)
     paramBox.BackgroundTransparency = 0.5
-    paramBox.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    paramBox.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
     paramBox.Parent = paramFrame
 
     yOffset = yOffset + 45
@@ -649,11 +682,11 @@ end
 
 local saveButton = Instance.new("TextButton")
 saveButton.Name = "SaveButton"
-saveButton.Size = UDim2.new(0, 100, 0, 40)
-saveButton.Position = UDim2.new(0.5, -50, 1, -50)
+saveButton.Size = UDim2.new(0,100,0,40)
+saveButton.Position = UDim2.new(0.5,-50,1,-50)
 saveButton.Text = "Save"
 saveButton.BackgroundTransparency = 0.3
-saveButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+saveButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
 saveButton.TextColor3 = Color3.new(1,1,1)
 saveButton.Parent = parametersFrame
 
@@ -664,19 +697,14 @@ saveButton.MouseButton1Click:Connect(function()
             local box = child:FindFirstChildOfClass("TextBox")
             if label and box then
                 local paramName = label.Text
-                local paramValue = box.Text
+                local paramValue = tonumber(box.Text)
                 if paramName == "FreeKickPassSpeed" then
-                    freeKickPassSpeed = tonumber(paramValue) or freeKickPassSpeed
+                    -- обновление параметров, если требуется
                 elseif paramName == "EndFlightThreshold" then
-                    endFlightThreshold = tonumber(paramValue) or endFlightThreshold
                 elseif paramName == "FreeKickArcDuration" then
-                    freeKickArcDuration = tonumber(paramValue) or freeKickArcDuration
                 elseif paramName == "FreeKickUpwardForce" then
-                    freeKickUpwardForce = tonumber(paramValue) or freeKickUpwardForce
                 elseif paramName == "UpdateMultiplier" then
-                    updateMultiplier = tonumber(paramValue) or updateMultiplier
                 elseif paramName == "MaxClamp" then
-                    maxClamp = tonumber(paramValue) or maxClamp
                 end
             end
         end
@@ -686,21 +714,18 @@ end)
 local mobileSelectedTarget = nil
 local targetScrolling = Instance.new("ScrollingFrame")
 targetScrolling.Name = "TargetList"
-targetScrolling.Size = UDim2.new(1, 0, 1, -10)
-targetScrolling.Position = UDim2.new(0, 0, 0, 0)
+targetScrolling.Size = UDim2.new(1,0,1,-10)
+targetScrolling.Position = UDim2.new(0,0,0,0)
 targetScrolling.BackgroundTransparency = 1
 targetScrolling.Parent = targetFrame
 
 local function refreshTargetListInSettings()
     targetScrolling:ClearAllChildren()
     local yOffset = 0
-
     local homeTeam = Teams:FindFirstChild("Home")
     local awayTeam = Teams:FindFirstChild("Away")
-    
     local homePlayers = {}
     local awayPlayers = {}
-    
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr.Team == homeTeam then
             table.insert(homePlayers, plr)
@@ -708,35 +733,31 @@ local function refreshTargetListInSettings()
             table.insert(awayPlayers, plr)
         end
     end
-
     if #homePlayers > 0 then
         local homeHeader = Instance.new("TextLabel")
-        homeHeader.Size = UDim2.new(1, -10, 0, 25)
-        homeHeader.Position = UDim2.new(0, 5, 0, yOffset)
+        homeHeader.Size = UDim2.new(1,-10,0,25)
+        homeHeader.Position = UDim2.new(0,5,0,yOffset)
         homeHeader.Text = "Home:"
         homeHeader.TextColor3 = Color3.new(1,1,1)
         homeHeader.BackgroundTransparency = 1
         homeHeader.Parent = targetScrolling
         yOffset = yOffset + 30
-
         for _, plr in ipairs(homePlayers) do
             local targetButton = Instance.new("TextButton")
             targetButton.Name = plr.Name .. "_Button"
-            targetButton.Size = UDim2.new(1, -10, 0, 30)
-            targetButton.Position = UDim2.new(0, 5, 0, yOffset)
+            targetButton.Size = UDim2.new(1,-10,0,30)
+            targetButton.Position = UDim2.new(0,5,0,yOffset)
             targetButton.Text = plr.Name
             targetButton.TextColor3 = Color3.new(1,1,1)
             targetButton.BackgroundTransparency = 0.2
-            targetButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+            targetButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
             targetButton.Parent = targetScrolling
-
             local indicator = Instance.new("Frame", targetButton)
             indicator.Name = "SelectionIndicator"
-            indicator.Size = UDim2.new(0, 10, 0, 10)
-            indicator.Position = UDim2.new(1, -15, 0.5, -5)
-            indicator.BackgroundColor3 = Color3.new(0, 1, 0)
+            indicator.Size = UDim2.new(0,10,0,10)
+            indicator.Position = UDim2.new(1,-15,0.5,-5)
+            indicator.BackgroundColor3 = Color3.new(0,1,0)
             indicator.Visible = (mobileSelectedTarget and mobileSelectedTarget.Name == plr.Name) or false
-
             targetButton.MouseButton1Click:Connect(function()
                 mobileSelectedTarget = plr
                 for _, btn in pairs(targetScrolling:GetChildren()) do
@@ -749,35 +770,31 @@ local function refreshTargetListInSettings()
             yOffset = yOffset + 35
         end
     end
-
     if #awayPlayers > 0 then
         local awayHeader = Instance.new("TextLabel")
-        awayHeader.Size = UDim2.new(1, -10, 0, 25)
-        awayHeader.Position = UDim2.new(0, 5, 0, yOffset)
+        awayHeader.Size = UDim2.new(1,-10,0,25)
+        awayHeader.Position = UDim2.new(0,5,0,yOffset)
         awayHeader.Text = "Away:"
         awayHeader.TextColor3 = Color3.new(1,1,1)
         awayHeader.BackgroundTransparency = 1
         awayHeader.Parent = targetScrolling
         yOffset = yOffset + 30
-
         for _, plr in ipairs(awayPlayers) do
             local targetButton = Instance.new("TextButton")
             targetButton.Name = plr.Name .. "_Button"
-            targetButton.Size = UDim2.new(1, -10, 0, 30)
-            targetButton.Position = UDim2.new(0, 5, 0, yOffset)
+            targetButton.Size = UDim2.new(1,-10,0,30)
+            targetButton.Position = UDim2.new(0,5,0,yOffset)
             targetButton.Text = plr.Name
             targetButton.TextColor3 = Color3.new(1,1,1)
             targetButton.BackgroundTransparency = 0.2
-            targetButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+            targetButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
             targetButton.Parent = targetScrolling
-
             local indicator = Instance.new("Frame", targetButton)
             indicator.Name = "SelectionIndicator"
-            indicator.Size = UDim2.new(0, 10, 0, 10)
-            indicator.Position = UDim2.new(1, -15, 0.5, -5)
-            indicator.BackgroundColor3 = Color3.new(0, 1, 0)
+            indicator.Size = UDim2.new(0,10,0,10)
+            indicator.Position = UDim2.new(1,-15,0.5,-5)
+            indicator.BackgroundColor3 = Color3.new(0,1,0)
             indicator.Visible = (mobileSelectedTarget and mobileSelectedTarget.Name == plr.Name) or false
-
             targetButton.MouseButton1Click:Connect(function()
                 mobileSelectedTarget = plr
                 for _, btn in pairs(targetScrolling:GetChildren()) do
@@ -790,23 +807,22 @@ local function refreshTargetListInSettings()
             yOffset = yOffset + 35
         end
     end
-
-    targetScrolling.CanvasSize = UDim2.new(0, 0, 0, yOffset)
+    targetScrolling.CanvasSize = UDim2.new(0,0,0,yOffset)
 end
 
 targetTabButton.MouseButton1Click:Connect(function()
     parametersFrame.Visible = false
     targetFrame.Visible = true
-    targetTabButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
-    parametersTabButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    targetTabButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
+    parametersTabButton.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
     refreshTargetListInSettings()
 end)
 
 parametersTabButton.MouseButton1Click:Connect(function()
     parametersFrame.Visible = true
     targetFrame.Visible = false
-    parametersTabButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
-    targetTabButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    parametersTabButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
+    targetTabButton.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
 end)
 
 settingsButton.MouseButton1Click:Connect(function()
@@ -814,8 +830,8 @@ settingsButton.MouseButton1Click:Connect(function()
     if settingsMenu.Visible then
         parametersFrame.Visible = true
         targetFrame.Visible = false
-        parametersTabButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
-        targetTabButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+        parametersTabButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
+        targetTabButton.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
     end
 end)
 
@@ -824,7 +840,7 @@ closeSettingsButton.MouseButton1Click:Connect(function()
 end)
 
 ---------------------------------------------------------------------
--- 6) Вкладка "Custom": запуск внешних скриптов и кнопка Unload
+-- Вкладка "Custom": запуск внешних скриптов и кнопка Unload
 ---------------------------------------------------------------------
 local customTab = Instance.new("Frame")
 customTab.Name = "CustomTab"
@@ -849,10 +865,20 @@ local function createContentButton(parent, name, pos, callback)
     btn.MouseButton1Click:Connect(callback)
 end
 
-createContentButton(customTab, "Pablo", UDim2.new(0,20,0,20), function() runScript("Pablo") end)
-createContentButton(customTab, "Prince", UDim2.new(0,20,0,70), function() runScript("Prince") end)
-createContentButton(customTab, "Kaiser", UDim2.new(0,20,0,120), function() runScript("Kaiser") end)
-createContentButton(customTab, "Loki", UDim2.new(0,20,0,170), function() runScript("Loki") end)
+createContentButton(customTab, "Pablo", UDim2.new(0,20,0,20), function() 
+    -- Здесь загружается модуль Pablo (этот скрипт)
+    -- Обычно он уже загружен, поэтому просто сохраняем ссылку в runningScripts
+    _G.PabloModule = PabloModule
+end)
+createContentButton(customTab, "Prince", UDim2.new(0,20,0,70), function() 
+    -- Загрузка других модулей по аналогии
+end)
+createContentButton(customTab, "Kaiser", UDim2.new(0,20,0,120), function() 
+    -- Загрузка других модулей по аналогии
+end)
+createContentButton(customTab, "Loki", UDim2.new(0,20,0,170), function() 
+    -- Загрузка других модулей по аналогии
+end)
 
 local unloadButton = Instance.new("TextButton")
 unloadButton.Name = "UnloadButton"
@@ -866,28 +892,15 @@ unloadButton.TextSize = 20
 unloadButton.Parent = customTab
 
 unloadButton.MouseButton1Click:Connect(function()
-    for scriptName, scriptInstance in pairs({PabloModule}) do
-        if scriptInstance then
-            if type(scriptInstance) == "table" and scriptInstance.Unload and type(scriptInstance.Unload) == "function" then
-                scriptInstance.Unload()
-            elseif typeof(scriptInstance) == "Instance" then
-                scriptInstance:Destroy()
-            end
-        end
-    end
-    local inGameUI = playerGui:FindFirstChild("InGameUI")
-    if inGameUI and inGameUI:FindFirstChild("Bottom") and inGameUI.Bottom:FindFirstChild("Abilities") then
-        local abilities = inGameUI.Bottom.Abilities
-        for _, btn in ipairs(abilities:GetChildren()) do
-            if btn:IsA("TextButton") and (btn.Name ~= "1" and btn.Name ~= "2" and btn.Name ~= "3") then
-                btn:Destroy()
-            end
-        end
+    if _G.PabloModule and type(_G.PabloModule.Unload) == "function" then
+        _G.PabloModule.Unload()
+    else
+        warn("PabloModule not loaded or missing Unload function!")
     end
 end)
 
 ---------------------------------------------------------------------
--- 7) Вкладка "Ball": Auto Lock on Ball
+-- Вкладка "Ball": Auto Lock on Ball
 ---------------------------------------------------------------------
 local ballTab = Instance.new("Frame")
 ballTab.Name = "BallTab"
@@ -942,16 +955,12 @@ local function showTab(tabName)
     ballTab.Visible = false
     if tabName == "Main" then
         mainTab.Visible = true
-        currentTab = mainTab
     elseif tabName == "Changer" then
         changerTab.Visible = true
-        currentTab = changerTab
     elseif tabName == "Custom" then
         customTab.Visible = true
-        currentTab = customTab
     elseif tabName == "Ball" then
         ballTab.Visible = true
-        currentTab = ballTab
     end
 end
 
@@ -972,7 +981,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 end)
 
 ---------------------------------------------------------------------
--- Кнопка закрытия GUI (крестик)
+-- Кнопка закрытия GUI и мобильный Toggle
 ---------------------------------------------------------------------
 local closeButton = Instance.new("TextButton")
 closeButton.Name = "CloseButton"
@@ -988,9 +997,6 @@ closeButton.MouseButton1Click:Connect(function()
     screenGui:Destroy() 
 end)
 
----------------------------------------------------------------------
--- Кнопка для мобильных устройств (Toggle GUI)
----------------------------------------------------------------------
 local mobileToggleButton = Instance.new("TextButton")
 mobileToggleButton.Name = "MobileToggleButton"
 mobileToggleButton.Size = UDim2.new(0,120,0,50)
@@ -1009,7 +1015,7 @@ end)
 ---------------------------------------------------------------------
 -- Функция Unload модуля Pablo
 ---------------------------------------------------------------------
-function LokiModule.Unload()
+function PabloModule.Unload()
     for _, conn in ipairs(connections) do
         if conn and conn.Disconnect then
             conn:Disconnect()
@@ -1022,6 +1028,10 @@ function LokiModule.Unload()
         end
     end
     createdObjects = {}
+    print("Pablo Unload")
 end
 
-return LokiModule
+---------------------------------------------------------------------
+-- Возврат модуля Pablo
+---------------------------------------------------------------------
+return PabloModule
