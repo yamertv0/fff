@@ -1,0 +1,1027 @@
+--[[  
+    Модуль Loki с поддержкой Unload.
+    Все созданные объекты и подключения сохраняются, чтобы потом можно было их удалить.
+--]]
+
+local LokiModule = {}
+local createdObjects = {}  -- сюда будем сохранять все созданные объекты
+local connections = {}     -- сюда сохраняем все подключения к событиям
+
+-- Обёртка для отслеживания созданных объектов
+local function track(object)
+    table.insert(createdObjects, object)
+    return object
+end
+
+-- Обёртка для отслеживания подключений
+local function trackConnection(connection)
+    table.insert(connections, connection)
+    return connection
+end
+
+---------------------------------------------------------------------
+-- Сервисы и переменные
+---------------------------------------------------------------------
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local Teams = game:GetService("Teams")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local mouse = player:GetMouse()
+
+-- Глобальная переменная для выбранного игрока через GUI (будет хранить объект Player)
+local mobileSelectedTarget = nil
+
+---------------------------------------------------------------------
+-- Добавление текста "Made by:ya_mertvi" в центре экрана при запуске скрипта
+---------------------------------------------------------------------
+do
+    local introGui = track(Instance.new("ScreenGui"))
+    introGui.Name = "IntroGui"
+    introGui.Parent = playerGui
+
+    local introText = track(Instance.new("TextLabel", introGui))
+    introText.Size = UDim2.new(0, 400, 0, 100)
+    introText.Position = UDim2.new(0.5, -200, 0.5, -50)
+    introText.Text = "Made by:ya_mertvi"
+    introText.TextScaled = true
+    introText.BackgroundTransparency = 1
+    introText.TextColor3 = Color3.new(1, 1, 1)
+    introText.Font = Enum.Font.SourceSansBold
+
+    task.delay(3, function()
+        introGui:Destroy()
+    end)
+end
+
+---------------------------------------------------------------------
+-- ПАРАМЕТРЫ СПОСОБНОСТЕЙ (настраиваемые через меню)
+---------------------------------------------------------------------
+local freeKickPassSpeed = 350       -- сила паса (используется при вызове Shoot)
+local freeKickArcDuration = 0.5     -- время подъёма (сек.)
+local freeKickUpwardForce = 50      -- сила подъёма
+local updateMultiplier = 6.5        -- множитель для плавной интерполяции траектории
+local maxClamp = 300                -- верхний предел скорости паса
+local endFlightThreshold = 7        -- если расстояние между мячом и целью <= это значение, полёт прекращается
+
+---------------------------------------------------------------------
+-- Функция поиска мяча
+---------------------------------------------------------------------
+local function getFootball()
+    local ball = workspace:FindFirstChild("Football")
+    if ball then return ball end
+    if player.Character then
+        ball = player.Character:FindFirstChild("Football")
+        if ball then return ball end
+    end
+    return nil
+end
+
+---------------------------------------------------------------------
+-- Проверка наличия мяча у игрока
+---------------------------------------------------------------------
+local function playerHasBall()
+    local char = player.Character
+    if not char then return false end
+    local valuesFolder = char:FindFirstChild("Values")
+    if not valuesFolder then return false end
+    local hasBallVal = valuesFolder:FindFirstChild("HasBall")
+    if not hasBallVal then return false end
+    return hasBallVal.Value == true
+end
+
+---------------------------------------------------------------------
+-- Изменение и фиксация стиля UI (пример)
+---------------------------------------------------------------------
+do
+    local style = playerGui:WaitForChild("Style")
+    local bg = style:WaitForChild("BG")
+    
+    local styleTxt = bg:WaitForChild("StyleTxt")
+    styleTxt.Text = "Pablo Cavasoz"
+    local uiGradient = Instance.new("UIGradient", styleTxt)
+    uiGradient.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0, Color3.new(1, 0, 0)),
+        ColorSequenceKeypoint.new(0.2, Color3.new(1, 0.5, 0)),
+        ColorSequenceKeypoint.new(0.4, Color3.new(1, 1, 0)),
+        ColorSequenceKeypoint.new(0.6, Color3.new(0, 1, 0)),
+        ColorSequenceKeypoint.new(0.8, Color3.new(0, 0, 1)),
+        ColorSequenceKeypoint.new(1, Color3.new(1, 0, 1))
+    }
+    uiGradient.Rotation = 45
+
+    styleTxt:GetPropertyChangedSignal("Text"):Connect(function()
+        if styleTxt.Text ~= "Pablo Cavasoz" then
+            styleTxt.Text = "Pablo Cavasoz"
+        end
+    end)
+    styleTxt:GetPropertyChangedSignal("TextColor3"):Connect(function()
+        if styleTxt.TextColor3 ~= Color3.new(1,1,1) then
+            styleTxt.TextColor3 = Color3.new(1,1,1)
+        end
+    end)
+
+    local desc = bg:WaitForChild("Desc")
+    desc.Text = "Professional player from Argentina with unsuspected kicks and passes"
+    desc:GetPropertyChangedSignal("Text"):Connect(function()
+        if desc.Text ~= "Professional player from Argentina with unsuspected kicks and passes" then
+            desc.Text = "Professional player from Argentina with unsuspected kicks and passes"
+        end
+    end)
+    local lockedDescColor = desc.TextColor3
+    desc:GetPropertyChangedSignal("TextColor3"):Connect(function()
+        if desc.TextColor3 ~= lockedDescColor then
+            desc.TextColor3 = lockedDescColor
+        end
+    end)
+end
+
+---------------------------------------------------------------------
+-- Функция для воспроизведения анимаций
+---------------------------------------------------------------------
+local function playAnimation(animationId)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        local animation = Instance.new("Animation")
+        animation.AnimationId = animationId
+        local animTrack = humanoid:LoadAnimation(animation)
+        animTrack:Play()
+        return animTrack
+    end
+end
+
+---------------------------------------------------------------------
+-- Функция для восстановления сварки мяча к персонажу
+---------------------------------------------------------------------
+local function restoreBallWeld(ball)
+    local parent = ball.Parent
+    if parent and parent:IsA("Model") and parent:FindFirstChild("HumanoidRootPart") then
+        if parent == player.Character then
+            for _, child in ipairs(ball:GetChildren()) do
+                if child:IsA("WeldConstraint") and child.Name == "BallWeld" then
+                    child:Destroy()
+                end
+            end
+            return
+        end
+        local hrp = parent.HumanoidRootPart
+        for _, child in ipairs(ball:GetChildren()) do
+            if child:IsA("WeldConstraint") and child.Name == "BallWeld" then
+                if child.Part1 == hrp then
+                    return
+                else
+                    child:Destroy()
+                end
+            end
+        end
+        local weld = Instance.new("WeldConstraint")
+        weld.Name = "BallWeld"
+        weld.Part0 = ball
+        weld.Part1 = hrp
+        weld.Parent = ball
+    else
+        for _, child in ipairs(ball:GetChildren()) do
+            if child:IsA("WeldConstraint") and child.Name == "BallWeld" then
+                child:Destroy()
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------
+-- 1) Способность: Vertical Spinning Shot (V)
+---------------------------------------------------------------------
+local verticalSpinningShotAnimationId = "rbxassetid://83376040878208" 
+local function activateVerticalSpinningShot()
+    if not playerHasBall() then return end
+    playAnimation(verticalSpinningShotAnimationId)
+    task.wait(1.5)
+    if not playerHasBall() then return end
+    local knitPackages = ReplicatedStorage:FindFirstChild("Packages")
+    if knitPackages and knitPackages:FindFirstChild("Knit") and knitPackages.Knit.Services:FindFirstChild("BallService") then
+        local ballService = knitPackages.Knit.Services.BallService
+        local shootEvent = ballService.RE:FindFirstChild("Shoot")
+        if shootEvent then
+            local lookVector = workspace.CurrentCamera.CFrame.LookVector
+            shootEvent:FireServer(178, nil, nil, lookVector)
+        end
+    end
+    task.spawn(function()
+        task.wait(0.3)
+        local ball, startTime = nil, tick()
+        repeat
+            task.wait(0.1)
+            ball = getFootball()
+        until (ball and ball:IsA("BasePart")) or (tick() - startTime > 2)
+        if ball then
+            local speed = 200
+            local camera = workspace.CurrentCamera
+            local rayOrigin = camera.CFrame.Position
+            local rayDirection = camera.CFrame.LookVector * 1000
+            local raycastResult = workspace:Raycast(rayOrigin, rayDirection)
+            local goalTarget = nil
+            local goalsFolder = workspace:FindFirstChild("Goals")
+            if raycastResult and raycastResult.Instance and goalsFolder and raycastResult.Instance:IsDescendantOf(goalsFolder) then
+                goalTarget = raycastResult.Instance
+            end
+            if goalTarget then
+                while ball and ball.Parent do
+                    local goalDir = goalTarget.Position - ball.Position
+                    local baseDir = goalDir.Unit
+                    local rightVector = baseDir:Cross(Vector3.new(0, 1, 0))
+                    local offset = ((math.floor((tick() - startTime) / 0.3) % 2 == 0) and rightVector or -rightVector) * 0.5
+                    local newDir = (baseDir + offset).Unit
+                    ball.AssemblyLinearVelocity = newDir * speed
+                    local relativePos = goalTarget.CFrame:PointToObjectSpace(ball.Position)
+                    if math.abs(relativePos.X) <= goalTarget.Size.X/2 and 
+                       math.abs(relativePos.Y) <= goalTarget.Size.Y/2 and 
+                       math.abs(relativePos.Z) <= goalTarget.Size.Z/2 then
+                        break
+                    end
+                    task.wait(0.1)
+                end
+            else
+                local duration = 3
+                local stepTime = 0.3
+                local elapsed = 0
+                local baseDir = camera.CFrame.LookVector
+                while ball and ball.Parent and elapsed < duration do
+                    local rightVector = baseDir:Cross(Vector3.new(0, 1, 0))
+                    local offset = ((math.floor(elapsed / stepTime) % 2 == 0) and rightVector or -rightVector) * 0.5
+                    local newDir = (baseDir + offset).Unit
+                    ball.AssemblyLinearVelocity = newDir * speed
+                    task.wait(stepTime)
+                    elapsed = elapsed + stepTime
+                end
+            end
+        end
+    end)
+end
+
+---------------------------------------------------------------------
+-- 2) Способность: Free Kick (F)
+---------------------------------------------------------------------
+local function activateFreeKick()
+    if not playerHasBall() then return end
+
+    local localTarget = nil
+    if mobileSelectedTarget then
+        localTarget = mobileSelectedTarget
+    else
+        local targetPart = mouse.Target
+        if not targetPart then return end
+        local targetCharacter = targetPart:FindFirstAncestorOfClass("Model")
+        local targetPlayer = Players:GetPlayerFromCharacter(targetCharacter)
+        if not targetPlayer then
+            warn("Free Kick: target is not a player!")
+            return
+        end
+        if targetPlayer == player then
+            warn("Free Kick: cannot pass to self!")
+            return
+        end
+        localTarget = targetPlayer
+    end
+
+    playAnimation(verticalSpinningShotAnimationId)
+
+    local targetHRP = localTarget.Character and localTarget.Character:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then
+        warn("Free Kick: target has no HumanoidRootPart!")
+        return
+    end
+
+    local ball = getFootball()
+    if not ball or not ball:IsA("BasePart") then
+        warn("Free Kick: ball not found!")
+        return
+    end
+
+    if ball:IsDescendantOf(player.Character) then
+        ball.Parent = workspace
+        for _, constraint in ipairs(ball:GetDescendants()) do
+            if constraint:IsA("Weld") or constraint:IsA("WeldConstraint") or constraint:IsA("Motor6D") then
+                constraint:Destroy()
+            end
+        end
+        ball.CanCollide = false
+        task.delay(0.3, function()
+            if ball then
+                ball.CanCollide = true
+            end
+        end)
+    end
+
+    ball:GetPropertyChangedSignal("Parent"):Connect(function()
+        restoreBallWeld(ball)
+    end)
+
+    local knitPackages = ReplicatedStorage:WaitForChild("Packages")
+        :WaitForChild("Knit")
+        :WaitForChild("Services")
+        :WaitForChild("BallService")
+    local shootEvent = knitPackages.RE:FindFirstChild("Shoot")
+    if shootEvent then
+        local initialDirection = (targetHRP.Position - ball.Position).Unit
+        shootEvent:FireServer(freeKickPassSpeed, nil, nil, initialDirection)
+    end
+
+    local arcPhase = true
+    local arcTime = 0
+    local arcDuration = freeKickArcDuration
+    local upwardForce = freeKickUpwardForce
+
+    ball.AssemblyLinearVelocity = Vector3.new(0, upwardForce, 0)
+
+    local heartbeatConn
+    heartbeatConn = RunService.Heartbeat:Connect(function(delta)
+        if not ball or not ball.Parent then
+            heartbeatConn:Disconnect()
+            return
+        end
+
+        if arcPhase then
+            arcTime = arcTime + delta
+            ball.AssemblyLinearVelocity = Vector3.new(0, upwardForce, 0)
+            if arcTime >= arcDuration then
+                arcPhase = false
+            end
+            return
+        end
+
+        if (targetHRP.Position - ball.Position).Magnitude <= endFlightThreshold then
+            heartbeatConn:Disconnect()
+            ball.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            return
+        end
+
+        local vector3_dir = Vector3.new(targetHRP.AssemblyLinearVelocity.X, 0, targetHRP.AssemblyLinearVelocity.Z)
+        local desiredDirection = (((targetHRP.Position + vector3_dir) - ball.Position).Unit + Vector3.new(0, 0.5, 0))
+        local clampedMagnitude = math.clamp((targetHRP.Position - ball.Position).Magnitude * 1.5, 70, maxClamp)
+        ball.AssemblyLinearVelocity = ball.AssemblyLinearVelocity:Lerp(desiredDirection * clampedMagnitude, updateMultiplier * delta)
+    end)
+end
+
+---------------------------------------------------------------------
+-- 3) Способность: Mega Dribbling (B)
+---------------------------------------------------------------------
+local dribbleAnimationId = "rbxassetid://18915766106"
+local dribbleDistance = 40
+local dribbleTime = 0.59
+local function activateMegaDribbling()
+    local char = player.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    playAnimation(dribbleAnimationId)
+    local knitPackages = ReplicatedStorage:WaitForChild("Packages")
+    if knitPackages and knitPackages:FindFirstChild("Knit") and knitPackages.Knit.Services:FindFirstChild("BallService") then
+        local ballService = knitPackages.Knit.Services.BallService
+        if ballService.RE:FindFirstChild("Dribble") then
+            ballService.RE.Dribble:FireServer()
+        end
+        if ballService.RE:FindFirstChild("Slide") then
+            ballService.RE.Slide:FireServer()
+        end
+    end
+    local tweenInfo = TweenInfo.new(dribbleTime, Enum.EasingStyle.Linear)
+    local goalCFrame = hrp.CFrame + hrp.CFrame.LookVector * dribbleDistance
+    local tween = TweenService:Create(hrp, tweenInfo, {CFrame = goalCFrame})
+    tween:Play()
+end
+
+---------------------------------------------------------------------
+-- 4) Способность: Strong Shot (N)
+---------------------------------------------------------------------
+local function activateStrongShot()
+    if not playerHasBall() then return end
+    playAnimation(verticalSpinningShotAnimationId)
+    task.wait(0.2)
+    local knitPackages = ReplicatedStorage:WaitForChild("Packages")
+        :WaitForChild("Knit")
+        :WaitForChild("Services")
+        :WaitForChild("BallService")
+    local shootEvent = knitPackages.RE:FindFirstChild("Shoot")
+    if shootEvent then
+        local lookVector = workspace.CurrentCamera.CFrame.LookVector
+        shootEvent:FireServer(235, nil, nil, lookVector)
+        task.spawn(function()
+            local ball, startTime = nil, tick()
+            repeat
+                task.wait()
+                ball = workspace:FindFirstChild("Football")
+            until ball and ball:IsA("BasePart") or tick() - startTime > 2
+            if ball then
+                ball.AssemblyLinearVelocity = (lookVector + Vector3.new(0, 0.25, 0)) * 235
+            end
+        end)
+    end
+end
+
+---------------------------------------------------------------------
+-- 5) Способность: Sneak (E)
+---------------------------------------------------------------------
+local function activateSneak()
+    local knitPackages = ReplicatedStorage:FindFirstChild("Packages")
+    if knitPackages and knitPackages:FindFirstChild("Knit") and knitPackages.Knit.Services:FindFirstChild("BallService") then
+        local ballService = knitPackages.Knit.Services.BallService
+        local ball = getFootball()
+        if ball and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local distance = (ball.Position - player.Character.HumanoidRootPart.Position).Magnitude
+            local stealThreshold = 10
+            if distance <= stealThreshold then
+                if ball:IsDescendantOf(player.Character) then
+                    ball.Parent = workspace
+                    for _, constraint in ipairs(ball:GetDescendants()) do
+                        if constraint:IsA("Weld") or constraint:IsA("WeldConstraint") or constraint:IsA("Motor6D") then
+                            constraint:Destroy()
+                        end
+                    end
+                    ball.CanCollide = false
+                    task.delay(0.3, function()
+                        if ball then
+                            ball.CanCollide = true
+                        end
+                    end)
+                end
+                if ballService.RE:FindFirstChild("Slide") then
+                    ballService.RE.Slide:FireServer()
+                end
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------
+-- Интерфейс способностей (кнопки и бинды)
+---------------------------------------------------------------------
+do
+    local inGameUI = playerGui:WaitForChild("InGameUI")
+    local bottom = inGameUI:WaitForChild("Bottom")
+    local abilities = bottom:WaitForChild("Abilities")
+    local templateButton = abilities:WaitForChild("1")
+
+    local verticalSpinningShotButton = templateButton:Clone()
+    verticalSpinningShotButton.Name = "VerticalSpinningShot"
+    do
+        local lbl = verticalSpinningShotButton:FindFirstChild("Timer")
+        if lbl then lbl.Text = "Vertical Spinning Shot" end
+        local kb = verticalSpinningShotButton:FindFirstChild("Keybind")
+        if kb then kb.Text = "V" end
+    end
+    verticalSpinningShotButton.Parent = abilities
+
+    local freeKickButton = templateButton:Clone()
+    freeKickButton.Name = "FreeKick"
+    do
+        local lbl = freeKickButton:FindFirstChild("Timer")
+        if lbl then lbl.Text = "Free Kick" end
+        local kb = freeKickButton:FindFirstChild("Keybind")
+        if kb then kb.Text = "F" end
+    end
+    freeKickButton.Parent = abilities
+
+    local dribblingButton = templateButton:Clone()
+    dribblingButton.Name = "MegaDribbling"
+    do
+        local lbl = dribblingButton:FindFirstChild("Timer")
+        if lbl then lbl.Text = "Mega Dribbling" end
+        local kb = dribblingButton:FindFirstChild("Keybind")
+        if kb then kb.Text = "B" end
+    end
+    dribblingButton.Parent = abilities
+
+    local strongShotButton = templateButton:Clone()
+    strongShotButton.Name = "StrongShot"
+    do
+        local lbl = strongShotButton:FindFirstChild("Timer")
+        if lbl then lbl.Text = "Strong Shot" end
+        local kb = strongShotButton:FindFirstChild("Keybind")
+        if kb then kb.Text = "N" end
+    end
+    strongShotButton.Parent = abilities
+
+    verticalSpinningShotButton.MouseButton1Click:Connect(function() activateVerticalSpinningShot() end)
+    freeKickButton.MouseButton1Click:Connect(function() activateFreeKick() end)
+    dribblingButton.MouseButton1Click:Connect(function() activateMegaDribbling() end)
+    strongShotButton.MouseButton1Click:Connect(function() activateStrongShot() end)
+end
+
+---------------------------------------------------------------------
+-- Обработка нажатия клавиш для способностей
+---------------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.V then
+        activateVerticalSpinningShot()
+    elseif input.KeyCode == Enum.KeyCode.F then
+        activateFreeKick()
+    elseif input.KeyCode == Enum.KeyCode.B then
+        activateMegaDribbling()
+    elseif input.KeyCode == Enum.KeyCode.N then
+        activateStrongShot()
+    elseif input.KeyCode == Enum.KeyCode.E then
+        activateSneak()
+    end
+end)
+
+---------------------------------------------------------------------
+-- МЕНЮ НАСТРОЕК (Free Kick параметры и выбор цели)
+---------------------------------------------------------------------
+local settingsGui = Instance.new("ScreenGui")
+settingsGui.Name = "SettingsGui"
+settingsGui.Parent = playerGui
+settingsGui.ResetOnSpawn = false
+
+local settingsButton = Instance.new("TextButton")
+settingsButton.Name = "SettingsButton"
+settingsButton.Size = UDim2.new(0, 80, 0, 40)
+settingsButton.Position = UDim2.new(1, -90, 0, 10)
+settingsButton.Text = "Settings"
+settingsButton.TextColor3 = Color3.new(1,1,1)
+settingsButton.BackgroundTransparency = 0.3
+settingsButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+settingsButton.Parent = settingsGui
+
+local settingsMenu = Instance.new("Frame")
+settingsMenu.Name = "SettingsMenu"
+settingsMenu.Size = UDim2.new(0, 400, 0, 500)
+settingsMenu.Position = UDim2.new(0.5, -200, 0.5, -250)
+settingsMenu.BackgroundColor3 = Color3.new(0, 0, 0)
+settingsMenu.BackgroundTransparency = 0.3
+settingsMenu.Active = true
+settingsMenu.Draggable = true
+settingsMenu.Visible = false
+settingsMenu.Parent = settingsGui
+
+local closeSettingsButton = Instance.new("TextButton")
+closeSettingsButton.Name = "CloseSettingsButton"
+closeSettingsButton.Size = UDim2.new(0, 50, 0, 30)
+closeSettingsButton.Position = UDim2.new(1, -55, 0, 5)
+closeSettingsButton.Text = "Close"
+closeSettingsButton.TextColor3 = Color3.new(1,1,1)
+closeSettingsButton.BackgroundTransparency = 0.3
+closeSettingsButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+closeSettingsButton.Parent = settingsMenu
+
+local parametersTabButton = Instance.new("TextButton")
+parametersTabButton.Name = "ParametersTab"
+parametersTabButton.Size = UDim2.new(0.5, -5, 0, 30)
+parametersTabButton.Position = UDim2.new(0, 5, 0, 40)
+parametersTabButton.Text = "Parameters"
+parametersTabButton.BackgroundColor3 = Color3.new(0.3,0.3,0.3)
+parametersTabButton.TextColor3 = Color3.new(1,1,1)
+parametersTabButton.Parent = settingsMenu
+
+local targetTabButton = Instance.new("TextButton")
+targetTabButton.Name = "TargetTab"
+targetTabButton.Size = UDim2.new(0.5, -5, 0, 30)
+targetTabButton.Position = UDim2.new(0.5, 0, 0, 40)
+targetTabButton.Text = "Target"
+targetTabButton.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
+targetTabButton.TextColor3 = Color3.new(1,1,1)
+targetTabButton.Parent = settingsMenu
+
+local parametersFrame = Instance.new("Frame")
+parametersFrame.Name = "ParametersFrame"
+parametersFrame.Size = UDim2.new(0, 400, 0, 420)
+parametersFrame.Position = UDim2.new(0, 5, 0, 80)
+parametersFrame.BackgroundTransparency = 1
+parametersFrame.Parent = settingsMenu
+
+local targetFrame = Instance.new("Frame")
+targetFrame.Name = "TargetFrame"
+targetFrame.Size = UDim2.new(0, 400, 0, 420)
+targetFrame.Position = UDim2.new(0, 5, 0, 80)
+targetFrame.BackgroundTransparency = 1
+targetFrame.Visible = false
+targetFrame.Parent = settingsMenu
+
+local parametersScrolling = Instance.new("ScrollingFrame")
+parametersScrolling.Name = "ParametersScrolling"
+parametersScrolling.Size = UDim2.new(1, 0, 1, 0)
+parametersScrolling.BackgroundTransparency = 1
+parametersScrolling.CanvasSize = UDim2.new(0, 0, 0, 300)
+parametersScrolling.Parent = parametersFrame
+
+local parametersData = {
+    {name = "FreeKickPassSpeed", value = freeKickPassSpeed},
+    {name = "EndFlightThreshold", value = endFlightThreshold},
+    {name = "FreeKickArcDuration", value = freeKickArcDuration},
+    {name = "FreeKickUpwardForce", value = freeKickUpwardForce},
+    {name = "UpdateMultiplier", value = updateMultiplier},
+    {name = "MaxClamp", value = maxClamp},
+}
+
+local yOffset = 0
+for i, param in ipairs(parametersData) do
+    local paramFrame = Instance.new("Frame")
+    paramFrame.Size = UDim2.new(1, -10, 0, 40)
+    paramFrame.Position = UDim2.new(0, 5, 0, yOffset)
+    paramFrame.BackgroundTransparency = 0.5
+    paramFrame.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
+    paramFrame.Parent = parametersScrolling
+
+    local paramLabel = Instance.new("TextLabel")
+    paramLabel.Size = UDim2.new(0.5, -5, 1, 0)
+    paramLabel.Position = UDim2.new(0, 5, 0, 0)
+    paramLabel.Text = param.name
+    paramLabel.TextColor3 = Color3.new(1,1,1)
+    paramLabel.BackgroundTransparency = 1
+    paramLabel.Parent = paramFrame
+
+    local paramBox = Instance.new("TextBox")
+    paramBox.Size = UDim2.new(0.5, -5, 1, 0)
+    paramBox.Position = UDim2.new(0.5, 5, 0, 0)
+    paramBox.Text = tostring(param.value)
+    paramBox.TextColor3 = Color3.new(1,1,1)
+    paramBox.BackgroundTransparency = 0.5
+    paramBox.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    paramBox.Parent = paramFrame
+
+    yOffset = yOffset + 45
+end
+
+local saveButton = Instance.new("TextButton")
+saveButton.Name = "SaveButton"
+saveButton.Size = UDim2.new(0, 100, 0, 40)
+saveButton.Position = UDim2.new(0.5, -50, 1, -50)
+saveButton.Text = "Save"
+saveButton.BackgroundTransparency = 0.3
+saveButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+saveButton.TextColor3 = Color3.new(1,1,1)
+saveButton.Parent = parametersFrame
+
+saveButton.MouseButton1Click:Connect(function()
+    for _, child in ipairs(parametersScrolling:GetChildren()) do
+        if child:IsA("Frame") then
+            local label = child:FindFirstChildOfClass("TextLabel")
+            local box = child:FindFirstChildOfClass("TextBox")
+            if label and box then
+                local paramName = label.Text
+                local paramValue = box.Text
+                if paramName == "FreeKickPassSpeed" then
+                    freeKickPassSpeed = tonumber(paramValue) or freeKickPassSpeed
+                elseif paramName == "EndFlightThreshold" then
+                    endFlightThreshold = tonumber(paramValue) or endFlightThreshold
+                elseif paramName == "FreeKickArcDuration" then
+                    freeKickArcDuration = tonumber(paramValue) or freeKickArcDuration
+                elseif paramName == "FreeKickUpwardForce" then
+                    freeKickUpwardForce = tonumber(paramValue) or freeKickUpwardForce
+                elseif paramName == "UpdateMultiplier" then
+                    updateMultiplier = tonumber(paramValue) or updateMultiplier
+                elseif paramName == "MaxClamp" then
+                    maxClamp = tonumber(paramValue) or maxClamp
+                end
+            end
+        end
+    end
+end)
+
+local mobileSelectedTarget = nil
+local targetScrolling = Instance.new("ScrollingFrame")
+targetScrolling.Name = "TargetList"
+targetScrolling.Size = UDim2.new(1, 0, 1, -10)
+targetScrolling.Position = UDim2.new(0, 0, 0, 0)
+targetScrolling.BackgroundTransparency = 1
+targetScrolling.Parent = targetFrame
+
+local function refreshTargetListInSettings()
+    targetScrolling:ClearAllChildren()
+    local yOffset = 0
+
+    local homeTeam = Teams:FindFirstChild("Home")
+    local awayTeam = Teams:FindFirstChild("Away")
+    
+    local homePlayers = {}
+    local awayPlayers = {}
+    
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Team == homeTeam then
+            table.insert(homePlayers, plr)
+        elseif plr.Team == awayTeam then
+            table.insert(awayPlayers, plr)
+        end
+    end
+
+    if #homePlayers > 0 then
+        local homeHeader = Instance.new("TextLabel")
+        homeHeader.Size = UDim2.new(1, -10, 0, 25)
+        homeHeader.Position = UDim2.new(0, 5, 0, yOffset)
+        homeHeader.Text = "Home:"
+        homeHeader.TextColor3 = Color3.new(1,1,1)
+        homeHeader.BackgroundTransparency = 1
+        homeHeader.Parent = targetScrolling
+        yOffset = yOffset + 30
+
+        for _, plr in ipairs(homePlayers) do
+            local targetButton = Instance.new("TextButton")
+            targetButton.Name = plr.Name .. "_Button"
+            targetButton.Size = UDim2.new(1, -10, 0, 30)
+            targetButton.Position = UDim2.new(0, 5, 0, yOffset)
+            targetButton.Text = plr.Name
+            targetButton.TextColor3 = Color3.new(1,1,1)
+            targetButton.BackgroundTransparency = 0.2
+            targetButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+            targetButton.Parent = targetScrolling
+
+            local indicator = Instance.new("Frame", targetButton)
+            indicator.Name = "SelectionIndicator"
+            indicator.Size = UDim2.new(0, 10, 0, 10)
+            indicator.Position = UDim2.new(1, -15, 0.5, -5)
+            indicator.BackgroundColor3 = Color3.new(0, 1, 0)
+            indicator.Visible = (mobileSelectedTarget and mobileSelectedTarget.Name == plr.Name) or false
+
+            targetButton.MouseButton1Click:Connect(function()
+                mobileSelectedTarget = plr
+                for _, btn in pairs(targetScrolling:GetChildren()) do
+                    if btn:IsA("TextButton") and btn:FindFirstChild("SelectionIndicator") then
+                        btn.SelectionIndicator.Visible = false
+                    end
+                end
+                indicator.Visible = true
+            end)
+            yOffset = yOffset + 35
+        end
+    end
+
+    if #awayPlayers > 0 then
+        local awayHeader = Instance.new("TextLabel")
+        awayHeader.Size = UDim2.new(1, -10, 0, 25)
+        awayHeader.Position = UDim2.new(0, 5, 0, yOffset)
+        awayHeader.Text = "Away:"
+        awayHeader.TextColor3 = Color3.new(1,1,1)
+        awayHeader.BackgroundTransparency = 1
+        awayHeader.Parent = targetScrolling
+        yOffset = yOffset + 30
+
+        for _, plr in ipairs(awayPlayers) do
+            local targetButton = Instance.new("TextButton")
+            targetButton.Name = plr.Name .. "_Button"
+            targetButton.Size = UDim2.new(1, -10, 0, 30)
+            targetButton.Position = UDim2.new(0, 5, 0, yOffset)
+            targetButton.Text = plr.Name
+            targetButton.TextColor3 = Color3.new(1,1,1)
+            targetButton.BackgroundTransparency = 0.2
+            targetButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+            targetButton.Parent = targetScrolling
+
+            local indicator = Instance.new("Frame", targetButton)
+            indicator.Name = "SelectionIndicator"
+            indicator.Size = UDim2.new(0, 10, 0, 10)
+            indicator.Position = UDim2.new(1, -15, 0.5, -5)
+            indicator.BackgroundColor3 = Color3.new(0, 1, 0)
+            indicator.Visible = (mobileSelectedTarget and mobileSelectedTarget.Name == plr.Name) or false
+
+            targetButton.MouseButton1Click:Connect(function()
+                mobileSelectedTarget = plr
+                for _, btn in pairs(targetScrolling:GetChildren()) do
+                    if btn:IsA("TextButton") and btn:FindFirstChild("SelectionIndicator") then
+                        btn.SelectionIndicator.Visible = false
+                    end
+                end
+                indicator.Visible = true
+            end)
+            yOffset = yOffset + 35
+        end
+    end
+
+    targetScrolling.CanvasSize = UDim2.new(0, 0, 0, yOffset)
+end
+
+targetTabButton.MouseButton1Click:Connect(function()
+    parametersFrame.Visible = false
+    targetFrame.Visible = true
+    targetTabButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+    parametersTabButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    refreshTargetListInSettings()
+end)
+
+parametersTabButton.MouseButton1Click:Connect(function()
+    parametersFrame.Visible = true
+    targetFrame.Visible = false
+    parametersTabButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+    targetTabButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+end)
+
+settingsButton.MouseButton1Click:Connect(function()
+    settingsMenu.Visible = not settingsMenu.Visible
+    if settingsMenu.Visible then
+        parametersFrame.Visible = true
+        targetFrame.Visible = false
+        parametersTabButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+        targetTabButton.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    end
+end)
+
+closeSettingsButton.MouseButton1Click:Connect(function()
+    settingsMenu.Visible = false
+end)
+
+---------------------------------------------------------------------
+-- 6) Вкладка "Custom": запуск внешних скриптов и кнопка Unload
+---------------------------------------------------------------------
+local customTab = Instance.new("Frame")
+customTab.Name = "CustomTab"
+customTab.Size = UDim2.new(1,0,1,0)
+customTab.Position = UDim2.new(0,0,0,0)
+customTab.BackgroundTransparency = 1
+customTab.Parent = contentFrame
+
+local function createContentButton(parent, name, pos, callback)
+    local btn = Instance.new("TextButton")
+    btn.Name = name.."Button"
+    btn.Size = UDim2.new(0,180,0,40)
+    btn.Position = pos
+    btn.BackgroundColor3 = Color3.fromRGB(90,90,90)
+    btn.Text = name
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.Font = BUTTON_FONT
+    btn.TextSize = 20
+    btn.Parent = parent
+    local uic = Instance.new("UICorner", btn)
+    uic.CornerRadius = UDim.new(0, BUTTON_CORNER)
+    btn.MouseButton1Click:Connect(callback)
+end
+
+createContentButton(customTab, "Pablo", UDim2.new(0,20,0,20), function() runScript("Pablo") end)
+createContentButton(customTab, "Prince", UDim2.new(0,20,0,70), function() runScript("Prince") end)
+createContentButton(customTab, "Kaiser", UDim2.new(0,20,0,120), function() runScript("Kaiser") end)
+createContentButton(customTab, "Loki", UDim2.new(0,20,0,170), function() runScript("Loki") end)
+
+local unloadButton = Instance.new("TextButton")
+unloadButton.Name = "UnloadButton"
+unloadButton.Text = "Unload"
+unloadButton.Size = UDim2.new(0,180,0,40)
+unloadButton.Position = UDim2.new(0,20,0,220)
+unloadButton.BackgroundColor3 = Color3.fromRGB(90,90,90)
+unloadButton.Font = BUTTON_FONT
+unloadButton.TextColor3 = Color3.new(1,1,1)
+unloadButton.TextSize = 20
+unloadButton.Parent = customTab
+
+unloadButton.MouseButton1Click:Connect(function()
+    for scriptName, scriptInstance in pairs({PabloModule}) do
+        if scriptInstance then
+            if type(scriptInstance) == "table" and scriptInstance.Unload and type(scriptInstance.Unload) == "function" then
+                scriptInstance.Unload()
+            elseif typeof(scriptInstance) == "Instance" then
+                scriptInstance:Destroy()
+            end
+        end
+    end
+    local inGameUI = playerGui:FindFirstChild("InGameUI")
+    if inGameUI and inGameUI:FindFirstChild("Bottom") and inGameUI.Bottom:FindFirstChild("Abilities") then
+        local abilities = inGameUI.Bottom.Abilities
+        for _, btn in ipairs(abilities:GetChildren()) do
+            if btn:IsA("TextButton") and (btn.Name ~= "1" and btn.Name ~= "2" and btn.Name ~= "3") then
+                btn:Destroy()
+            end
+        end
+    end
+end)
+
+---------------------------------------------------------------------
+-- 7) Вкладка "Ball": Auto Lock on Ball
+---------------------------------------------------------------------
+local ballTab = Instance.new("Frame")
+ballTab.Name = "BallTab"
+ballTab.Size = UDim2.new(1,0,1,0)
+ballTab.Position = UDim2.new(0,0,0,0)
+ballTab.BackgroundTransparency = 1
+ballTab.Parent = contentFrame
+
+local autoLockButton = Instance.new("TextButton")
+autoLockButton.Name = "AutoLockButton"
+autoLockButton.Text = "Auto Lock on Ball: OFF"
+autoLockButton.Size = UDim2.new(0,200,0,40)
+autoLockButton.Position = UDim2.new(0,20,0,20)
+autoLockButton.BackgroundColor3 = Color3.fromRGB(90,90,90)
+autoLockButton.Font = BUTTON_FONT
+autoLockButton.TextColor3 = Color3.new(1,1,1)
+autoLockButton.TextSize = 24
+autoLockButton.Parent = ballTab
+
+local autoLockEnabled = false
+autoLockButton.MouseButton1Click:Connect(function()
+    autoLockEnabled = not autoLockEnabled
+    if autoLockEnabled then
+        autoLockButton.Text = "Auto Lock on Ball: ON"
+        task.spawn(function()
+            while autoLockEnabled do
+                if not playerHasBall() then
+                    local ball = workspace:FindFirstChild("Football", true)
+                    if ball and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                        local hrp = player.Character.HumanoidRootPart
+                        local dist = (ball.Position - hrp.Position).Magnitude
+                        if dist > 5 then
+                            hrp.CFrame = CFrame.new(hrp.Position, ball.Position)
+                        end
+                    end
+                end
+                task.wait(0.03)
+            end
+        end)
+    else
+        autoLockButton.Text = "Auto Lock on Ball: OFF"
+    end
+end)
+
+---------------------------------------------------------------------
+-- Переключение вкладок
+---------------------------------------------------------------------
+local function showTab(tabName)
+    mainTab.Visible = false
+    changerTab.Visible = false
+    customTab.Visible = false
+    ballTab.Visible = false
+    if tabName == "Main" then
+        mainTab.Visible = true
+        currentTab = mainTab
+    elseif tabName == "Changer" then
+        changerTab.Visible = true
+        currentTab = changerTab
+    elseif tabName == "Custom" then
+        customTab.Visible = true
+        currentTab = customTab
+    elseif tabName == "Ball" then
+        ballTab.Visible = true
+        currentTab = ballTab
+    end
+end
+
+showTab("Main")
+mainTabButton.MouseButton1Click:Connect(function() showTab("Main") end)
+changerTabButton.MouseButton1Click:Connect(function() showTab("Changer") end)
+customTabButton.MouseButton1Click:Connect(function() showTab("Custom") end)
+ballTabButton.MouseButton1Click:Connect(function() showTab("Ball") end)
+
+---------------------------------------------------------------------
+-- Клавиша "L" для скрытия/отображения GUI
+---------------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.L then
+        mainFrame.Visible = not mainFrame.Visible
+    end
+end)
+
+---------------------------------------------------------------------
+-- Кнопка закрытия GUI (крестик)
+---------------------------------------------------------------------
+local closeButton = Instance.new("TextButton")
+closeButton.Name = "CloseButton"
+closeButton.Size = UDim2.new(0,30,0,30)
+closeButton.Position = UDim2.new(1,-40,0,10)
+closeButton.BackgroundColor3 = Color3.fromRGB(255,0,0)
+closeButton.Text = "X"
+closeButton.Font = BUTTON_FONT
+closeButton.TextColor3 = Color3.new(1,1,1)
+closeButton.TextSize = 20
+closeButton.Parent = mainFrame
+closeButton.MouseButton1Click:Connect(function() 
+    screenGui:Destroy() 
+end)
+
+---------------------------------------------------------------------
+-- Кнопка для мобильных устройств (Toggle GUI)
+---------------------------------------------------------------------
+local mobileToggleButton = Instance.new("TextButton")
+mobileToggleButton.Name = "MobileToggleButton"
+mobileToggleButton.Size = UDim2.new(0,120,0,50)
+mobileToggleButton.Position = UDim2.new(0,10,0,10)
+mobileToggleButton.BackgroundColor3 = Color3.fromRGB(120,120,120)
+mobileToggleButton.Text = "Toggle GUI"
+mobileToggleButton.Font = BUTTON_FONT
+mobileToggleButton.TextColor3 = Color3.new(1,1,1)
+mobileToggleButton.TextSize = 20
+mobileToggleButton.Parent = screenGui
+mobileToggleButton.ZIndex = 10
+mobileToggleButton.MouseButton1Click:Connect(function() 
+    mainFrame.Visible = not mainFrame.Visible 
+end)
+
+---------------------------------------------------------------------
+-- Функция Unload модуля Pablo
+---------------------------------------------------------------------
+function LokiModule.Unload()
+    for _, conn in ipairs(connections) do
+        if conn and conn.Disconnect then
+            conn:Disconnect()
+        end
+    end
+    connections = {}
+    for _, obj in ipairs(createdObjects) do
+        if obj and obj.Destroy then
+            pcall(function() obj:Destroy() end)
+        end
+    end
+    createdObjects = {}
+end
+
+return LokiModule
